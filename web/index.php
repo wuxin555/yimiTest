@@ -4,9 +4,6 @@
 defined('YII_DEBUG') or define('YII_DEBUG', true);
 defined('YII_ENV') or define('YII_ENV', 'dev');
 defined('YII_DEV') or define('YII_DEV', true);
-//判断浏览器是否支持webp解析 1支持  0不支持
-$webp = strpos($_SERVER['HTTP_ACCEPT'], 'image/webp');
-define('IS_WEBP', $webp === false ? 0 : 1);
 
 require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/../vendor/yiisoft/yii2/Yii.php';

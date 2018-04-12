@@ -315,12 +315,15 @@ class lib_image_imagick
     public function output($header = true)
     {
         if ($this->type == 'webp') {
-            //判断浏览器是否支持webp解析 1支持  0不支持
-            if (IS_WEBP == 0) {
+            //判断浏览器是否支持webp解析  false不支持
+            $isWebp = strpos($_SERVER['HTTP_ACCEPT'], 'image/webp');
+            if ($isWebp === false) {
                 $this->set_type('jpg');
             }
         }
-        if($header) header('Content-type: '.$this->type);
+        if($header) {
+            header('Content-type: image/'.$this->type);
+        }
         echo $this->image->getImagesBlob();
     }
 

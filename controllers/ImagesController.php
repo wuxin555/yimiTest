@@ -133,19 +133,24 @@ class ImagesController extends Controller
     public function actionCreateImage(){
         /*
          * 1.获取参数 img_id,width,height,extension等参数
-         * 2.从缓存中查询该图片是否存在，10个级距，若存在，直接返回图片
-         * 3.从数据库查询图片路径
-         * 4.通过判断该图片是否存在,若不存在，返回false
-         * 5.将图片进行方法缩小改格式等操作。取其内容存入缓存文件中
+         * 2.通过img_id查询原图信息，获取原始width,height，url
+         * 3.通过传进来的width，height和原始图片的width,height判断最接近与图片中的哪个级距（1-10 按比例改变图片大小，级距越大，图片越大）
+         * 4.从缓存中查询该img_id是否存在,若存在，获取图片信息
+         * 5.若缓存中不存在，
+         *      1）将图片信息存于数组,根据其图片类型区分，存入编码后的图片二进制流，
+         *          ['jpg' => [['width*height' => 'ewe'],['20*30' => 'ewe'],...],
+         *          'png' => [['20*30' => 'ewe'],['20*30' => 'ewe']],
+         *          'webp' => [['20*30' => 'ewe'],['20*30' => 'ewe']]
+         *          ]
+         *      2）另外通过第三部拿到的最接近的级距和图片类型，拿到要展示的图片二进制流
+         * 6.将数组存入缓存，以img_id为键值
          */
 
-         $img = yii::$app->request->get("img");
+        $img = yii::$app->request->get("img");
 
         //获取图片的参数 width height img_id extension
-//        $img = '000117ade10eed8a3640b44a22de45ae-w200-h190.jpg';
         $img = explode('.', $img);
         $extension = $img[1]; //图片格式
-
         $imgInfo = explode('-', $img[0]);
         $imgId = null;
         $width = null;
@@ -167,50 +172,12 @@ class ImagesController extends Controller
             return json_encode($arr);
         }
 
-        include '../helper/imagick.class.php';
-        //从缓存中读取图片  10 个级距，放入
-        for ($i=0;$i<=5;$i++) {
-            $keys = [];
-            if ($width && !$height) {
-                //只有宽度 无高度的情况
-                $key1 = $imgId.'-w'.($width+$i)."-".$extension;
-                $key2 = $imgId.'-w'.($width-$i)."-".$extension;
-                array_push($keys , $key1 , $key2);
-            } else if ($height && !$width) {
-                //只有高度 无宽度的情况
-                $key1 = $imgId.'-h'.($height+$i)."-".$extension;
-                $key2 = $imgId.'-h'.($height-$i)."-".$extension;
-                array_push($keys , $key1 , $key2);
-            } else if ($width && $height) {
-                for ($j=0;$j<=5;$j++) {
-                    //获取同宽度下高度级距为10的数据
-                    $key1 = $imgId.'-w'.($width+$i).'-h'.($height+$j)."-".$extension;
-                    $key2 = $imgId.'-w'.($width+$i).'-h'.($height-$j)."-".$extension;
-                    $key3 = $imgId.'-w'.($width-$i).'-h'.($height+$j)."-".$extension;
-                    $key4 = $imgId.'-w'.($width-$i).'-h'.($height-$j)."-".$extension;
-                    array_push($keys , $key1 , $key2 , $key3 , $key4);
-                }
-            }
-
-            $keys = array_unique($keys);
-            foreach ($keys as &$v) {
-                if (yii::$app->cache->get($v)) {
-                    //若缓存中存在该图片
-                    $imgInfo = yii::$app->cache->get($v);
-                    $imageBlob = base64_decode($imgInfo);
-                    //从二进制中读出图片
-                    $image = new lib_image_imagick();
-                    $image->readImageByBlob($imageBlob , $extension);
-                    $image->output();
-                    exit;
-                }
-            }
-        }
-
-        //缓存中不存在，获取图片路径
-        $image = Images::find()->select('image_id , url')->where(['image_id' => $imgId])->asArray()->one();
+        //获取图片信息 img_id url width height
+        $originImage = Images::find()->select('image_id,url,width,height')->where(['image_id' => $imgId])->asArray()->one();
+        $originWidth = $originImage['width'];
+        $originHeight = $originImage['height'];
         $path = Yii::getAlias('@webroot');
-        $imgPath = $path.'/'.$image['url'];
+        $imgPath = $path.'/'.$originImage['url'];
 
         //判断图片是否存在
         if (!file_exists($imgPath)) {
@@ -218,20 +185,95 @@ class ImagesController extends Controller
             return json_encode($arr);
         }
 
-        //处理图片
+        //判断当前图片尺寸最接近第几个级距，图片尺寸随级距依次增大
+        $num = $this->getImageFittingPosition($width , $height , $originWidth , $originHeight);
+
+        include '../helper/imagick.class.php';
+        //从缓存中读取图片
+        if (yii::$app->cache->get($imgId)) {
+            $imageCache = yii::$app->cache->get($imgId);
+            $key = round($originWidth/10*$num)."*".round($originHeight/10*$num); //获取最接近的width和height
+            $imageCache = $imageCache[$extension];//获取缓存里该图片类型下的所有图片信息（10个）
+            $imgInfo = $imageCache[$key];
+            if ($imgInfo) {
+                $imageBlob = base64_decode($imgInfo);
+                //从二进制中读出图片
+                $image = new lib_image_imagick();
+                $image->readImageByBlob($imageBlob , $extension);
+                $image->output();
+                exit;
+            }
+        }
+
+        //缓存中不存在，处理图片
         $image = new lib_image_imagick();
         $image->open($imgPath);
-        $image->resize_to($width, $height, 'scale');
-        $image->set_type($extension);
+        $imagesArr = [];
+        $imageBlob = '';//要展示的图片二进制
+        for ($i = 1 ; $i <= 10 ; $i++) {
+            $width = round($originWidth/10*$i);
+            $height = round($originHeight/10*$i);
 
-        //将图片放入缓存
-        $key = implode("-" , $img);
-        $filePath = $path.'/'.$key;
-        $image->save_to($filePath);
-        $content = file_get_contents($filePath);
-        unlink($filePath);
+            $image->resize_to($width, $height, 'scale');
+            foreach ($imgTypes as $v) {
+                $image->set_type($extension);
+                //将图片放入数组中 ['jpg' => [['20*30' => 'ewe'],['20*30' => 'ewe']]]
+                $filePath = $path.'/'.$imgId;
+                $image->save_to($filePath);
+                $content = file_get_contents($filePath);
+                $imagesArr[$v][$width.'*'.$height] = base64_encode($content);
+                unlink($filePath);
 
-        yii::$app->cache->set($key , base64_encode($content));
+                if ($num == $i && $v == $extension) {
+                    //通过最接近的级距和图片类型，拿到要展示的图片二进制流
+                    $imageBlob = $content;
+                }
+            }
+        }
+
+        //将该图片的信息存入缓存，以img_id为键值
+        yii::$app->cache->set($imgId , $imagesArr);
+        //通过二进制读取图片
+        $image->readImageByBlob($imageBlob , $extension);
         $image->output();
+    }
+    /*
+     *判断所要获取的图片最接近的级距位置，返回第几级距，级距越大，图片尺寸越大
+     */
+    public function getImageFittingPosition($currentWidth = '' , $currentHeight = '' , $originWidth , $originHeight){
+        if ($currentWidth) {
+            //传进来的width > 原图的width , 返回第10级距（返回原图大小）
+            if ($currentWidth > $originWidth) {
+                $num = 10;
+            } else {
+                $num = $currentWidth*10/$originWidth;
+                if ($num < 1) {
+                    //传进来的width < 最小图的width , 返回第1级距
+                    $num = 1;
+                } else {
+                    //四舍五入取整
+                    $num = round($num);
+                }
+            }
+        } else if ($currentHeight) {
+            //传进来的height > 原图的height , 返回第10级距（返回原图大小）
+            if ($currentHeight > $originHeight) {
+                $num = 10;
+            } else {
+                $num = $currentHeight*10/$originHeight;
+                if ($num < 1) {
+                    //传进来的height < 最小图的height , 返回第1级距
+                    $num = 1;
+                } else {
+                    //四舍五入取整
+                    $num = round($num);
+                }
+            }
+        } else {
+            //没有传进width , height参数 , 返回第10级距（返回原图大小）
+            $num = 10;
+        }
+
+        return $num;
     }
 }
